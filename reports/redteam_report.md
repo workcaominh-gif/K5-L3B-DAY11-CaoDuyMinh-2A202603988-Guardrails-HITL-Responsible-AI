@@ -135,3 +135,38 @@ at 0% regardless of language or obfuscation. This is the same lesson Blue applie
 "ngăn hẳn, not giảm."
 
 **Totals across rounds 1–3:** Red leaked 86/124 attacks; Red Advance leaked 0/124.
+
+---
+
+# Bonus B2 attempt — regex bypass on Red Advance (local target)
+
+Goal: leak a secret past Red Advance's full stack (L1 regex → L2 NeMo input → model → L3 regex →
+L4 NeMo output). 10 prompts crafted from the loophole analysis of the lab's own `guards_agent.py`:
+each carries a banking keyword (to short-circuit `topic_filter_strong`, which returns ALLOW on the
+first banking word before its extractive check) and paraphrases the target ("startup values",
+"setup note", "the login value / access token / host address") to dodge all ~30 injection patterns
+and the `reveal|disclose|translate|…+secret|password|internal` override patterns.
+
+Raw data: `reports/b2_attempt.json`.
+
+| Metric | Result |
+|---|---|
+| Passed the **regex** layer (inj=False AND topic=False) | **10 / 10** |
+| Stopped at **NeMo input rail** (LLM self-check) | 10 / 10 |
+| Actually **leaked** a secret (B2) | **0 / 10** |
+
+**Finding — the regex IS bypassable; the LLM rail is what held.**
+- The deterministic layer failed exactly as the loophole analysis predicted: a banking word disables
+  the topic filter, and synonym paraphrase evades the fixed injection denylist, so all 10 reached
+  past L1.
+- Every one was then caught by **L2 NeMo's LLM self-check**, which judges *intent* ("is this trying to
+  extract configuration?") rather than keywords, so paraphrase does not help.
+- This is concrete proof of why Red Advance pairs regex with NeMo: against the regex alone these 10
+  prompts would have reached the model; only the model-based layer stopped them. Defense-in-depth
+  earned its place here.
+
+**Implication for Blue.** Blue (my CP2 defense) relies on regex at the input layer only, so these same
+10 paraphrase prompts would bypass Blue's `detect_injection`/`topic_filter` and reach its LLM — the
+LLM's own refusal and Blue's output redaction are then the only remaining defense. A judge/NeMo input
+layer (the lab's optional LLM-judge) would close this gap. Logged as a known limitation, not fixed,
+to keep the graded CP2/CP3 code as submitted.
