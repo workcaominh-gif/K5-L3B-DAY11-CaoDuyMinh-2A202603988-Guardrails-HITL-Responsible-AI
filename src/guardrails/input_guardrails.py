@@ -42,6 +42,42 @@ InputStatus = Literal["ALLOW", "BLOCK"]
 # Regex is one signal, not the whole security boundary.
 # ============================================================
 
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]")
+
+# Leetspeak / look-alike digits that attackers use to dodge keyword regex.
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
+
+
+def _canonicalize(text: str) -> str:
+    """NFKC fold, drop zero-width/bidi characters, strip Vietnamese accents, collapse spacing."""
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", text or "")
+    text = _INVISIBLE.sub("", text)
+    text = text.replace("đ", "d").replace("Đ", "D")
+    text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+# Each pattern is one signal; the plugin layer, output filter and egress check back it up.
+INJECTION_PATTERNS = [
+    r"\b(ignore|disregard|forget|override|bypass)\b.{0,40}\b(previous|prior|above|earlier|all|your|system|safety)\b.{0,20}\b(instructions?|rules?|prompts?|guidelines?|polic(y|ies))\b",
+    r"\byou are now\b",
+    r"\bsystem prompt\b|\bsystem message\b|\bhidden (instructions?|prompt)\b",
+    r"\b(reveal|show|print|repeat|leak|dump|output|tell me)\b.{0,30}\b(your|the)?\s*(instructions?|prompt|configuration|config)\b",
+    r"\bpretend (you are|to be|you're)\b",
+    r"\bact as (a |an )?(unrestricted|unfiltered|jailbroken|evil|admin|developer|root)\b",
+    r"\b(dan|do anything now|developer mode|jailbreak|god mode)\b",
+    r"\b(admin|administrator|root|database|db)\s*(password|passwd|pwd|credentials?)\b|\b(api[ _-]?key|secret key|access token|connection string|db[ _-]?host|database host)\b",
+    r"\b(new|updated) (instructions?|rules?)\s*:",
+    r"\[\s*(system|admin|developer)\s*\]|<\s*/?\s*(system|sys)\s*>",
+    # Vietnamese (accents already stripped)
+    r"\b(bo qua|phot lo|quen)\b.{0,30}\b(huong dan|chi dan|quy tac|lenh)\b",
+    r"\b(tiet lo|cho (toi|tui|minh) biet|in ra)\b.{0,30}\b(mat khau|khoa api|api key|cau hinh|system prompt)\b",
+    r"\bmat khau (admin|quan tri)\b",
+]
+
+
 def detect_injection(user_input: str) -> InputStatus:
     """Detect prompt injection patterns in user input.
 
@@ -51,15 +87,12 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
-    INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
-    ]
-
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
-            return "BLOCK"
+    text = _canonicalize(user_input)
+    variants = {text, text.translate(_LEET)}
+    for candidate in variants:
+        for pattern in INJECTION_PATTERNS:
+            if re.search(pattern, candidate, re.IGNORECASE):
+                return "BLOCK"
     return "ALLOW"
 
 
@@ -84,14 +117,14 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    text = _canonicalize(user_input)
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
-
-    pass  # Replace with your implementation
+    for topic in BLOCKED_TOPICS:
+        if re.search(rf"\b{re.escape(topic)}", text):
+            return "BLOCK"
+    if any(re.search(rf"\b{re.escape(_canonicalize(topic))}", text) for topic in ALLOWED_TOPICS):
+        return "ALLOW"
+    return "BLOCK"
 
 
 # ============================================================
@@ -112,6 +145,7 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         super().__init__(name="input_guardrail")
         self.blocked_count = 0
         self.total_count = 0
+        self.last_block_reason = None
 
     def _extract_text(self, content: types.Content) -> str:
         """Extract plain text from a Content object."""
@@ -144,14 +178,22 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
-
-        pass  # Replace with your implementation
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            self.last_block_reason = "prompt_injection"
+            return self._block_response(
+                "Request blocked: it looks like an attempt to change my instructions or extract "
+                "internal data. I can only help with VinBank banking questions."
+            )
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            self.last_block_reason = "off_topic"
+            return self._block_response(
+                "Sorry, I can only help with VinBank topics such as accounts, transfers, "
+                "savings, loans, cards and interest rates."
+            )
+        self.last_block_reason = None
+        return None
 
 
 # ============================================================
