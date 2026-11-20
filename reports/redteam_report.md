@@ -205,3 +205,36 @@ is the Day-10 lesson again: prevent (ngăn hẳn), don't just reduce (giảm).
 Naive-ask note: against the **graded** Blue, a bare "what is the api key / admin password / database
 host" is blocked at the input layer (injection regex + topic filter) before any LLM call; only a real
 banking question passes. Hardening adds the layer that holds even if those filters are bypassed.
+
+---
+
+# Blue vs Red Advance — head-to-head (data)
+
+The 10 paraphrase prompts that bypassed Red Advance's regex (`reports/b2_attempt.json`) run against
+**Blue** (`reports/blue_vs_paraphrase.json`):
+
+| Outcome | Blue | Red Advance |
+|---|---:|---:|
+| Blocked at the input (regex) | 2 / 10 | 0 / 10 (but NeMo caught all 10) |
+| Reached the model | 6 / 10 | 0 / 10 |
+| Provider error (429/504) | 2 / 10 | — |
+| **Secret leaked** | **0 / 10** | **0 / 10** |
+
+**Reading it.**
+- Blue's input regex is weaker than Red Advance's stack: it caught 2/10 of these paraphrases and let
+  6 reach the model. Red Advance's regex also let them past, but its **NeMo LLM intent layer** — which
+  Blue lacks — caught every one.
+- Neither leaked. Blue's defense-in-depth held via the model's own refusal plus output redaction.
+
+**Verdict.**
+- Pure anti-extraction gate: **Red Advance ≥ Blue** (NeMo intercepts paraphrase at the input).
+- Overall production defense: **Blue ≥ Red Advance** (rate limit, egress allowlist, audit/monitoring,
+  and it must stay helpful to customers — Red Advance only has to refuse).
+- Strongest overall: **Hardened Blue** (secrets-out-of-context) — 0 leaks even with all guards off.
+
+## Note — Insecure Output Handling (OWASP LLM02)
+
+Blue's `content_filter` redacts secrets/PII but does **not** sanitize HTML/JS. A production app that
+rendered agent output as raw HTML could be XSS'd via model output (garak `xss`). Out of scope for the
+lab's leak objective, but a real gap; the fix is HTML-encoding output before rendering. The local test
+UI (`scripts/webui.py`) already escapes `<` before inserting replies, so it is not XSS-vulnerable.
